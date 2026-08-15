@@ -1,0 +1,53 @@
+# backbone-messaging-app — base configuration.
+#
+# Secrets are ENV-VAR REFERENCES ONLY (ADR-0024 interim): `${VAR}` expands
+# from the process environment at load; a missing referenced variable is a
+# boot failure, never an empty-string secret.
+
+server:
+  host: "0.0.0.0"
+  port: 8080
+
+database:
+  url: "${DATABASE_URL:-postgres://root:password@localhost:5432/backbone_mail}"
+  max_connections: 10
+
+security:
+  # The app-auth JWT signing secret (user-scope verifier). `sub` on every
+  # token carries the caller's PARTNER uuid.
+  jwt_secret: "${JWT_SECRET}"
+  # The SSE session-proof HMAC key (minted on stream connect, required by
+  # bus presence updates — the is_websocket_session port).
+  session_secret: "${MESSAGING_SESSION_SECRET}"
+  # Partners granted admin edges (author-or-admin gates). Empty by default.
+  admin_partners: []
+
+# Realtime (SSE over the outbox tailer — ADR-0017).
+realtime:
+  window_seconds: 55
+  poll_ms: 1000
+
+# Job runner intervals (seconds).
+jobs:
+  sms_process_interval_seconds: 30
+  mail_process_interval_seconds: 30
+  scheduled_dispatch_interval_seconds: 60
+  notification_gc_interval_seconds: 3600
+  presence_gc_interval_seconds: 3600
+  guest_gc_interval_seconds: 600
+  stuck_sweep_interval_seconds: 900
+  # Only 'noop' until the increment-3 gateway group (MAIL-M26/27).
+  sms_provider: "noop"
+
+# GC bounds (mirror the module defaults; see backbone-mail GcService).
+gc:
+  notification_retention_days: 30   # MAIL-B8
+  presence_stale_hours: 12          # MAIL-M11
+  guest_stale_minutes: 60           # MAIL-M43
+  stuck_threshold_minutes: 15       # SM-B13
+
+# MAIL-B1 static thread access: document models whose chatter is open to
+# every authenticated partner. Empty = deny-by-default (the safe posture —
+# host documents stay closed until explicitly opened here).
+messaging:
+  open_thread_models: []

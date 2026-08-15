@@ -1,0 +1,3 @@
+# Dev overlay (APP_ENV=dev, the default). Dev-local convenience only — the
+# secrets still come from the environment (use the docker-compose env or
+# export JWT_SECRET / MESSAGING_SESSION_SECRET).

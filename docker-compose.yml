@@ -1,0 +1,37 @@
+# Local dev: postgres on :5432 + the app on :8080.
+# Secrets are env-driven (ADR-0024) — export or use the inline defaults below
+# for LOCAL DEV ONLY.
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: root
+      POSTGRES_PASSWORD: password
+      POSTGRES_DB: backbone_mail
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U root -d backbone_mail"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  messaging-app:
+    build: .
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgres://root:password@postgres:5432/backbone_mail
+      # LOCAL DEV placeholders — NEVER reuse outside this compose file.
+      JWT_SECRET: dev-jwt-secret-not-for-production
+      MESSAGING_SESSION_SECRET: dev-session-secret-not-for-production
+      SMS_WEBHOOK_SECRET: dev-webhook-secret-not-for-production
+      APP_PORT: "8080"
+    ports:
+      - "8080:8080"
+
+volumes:
+  pgdata:

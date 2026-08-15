@@ -1,0 +1,7 @@
+# Prod overlay (APP_ENV=prod). Everything trust-bearing stays env-driven;
+# this file only tightens operational defaults.
+server:
+  port: 8080
+
+database:
+  max_connections: 20

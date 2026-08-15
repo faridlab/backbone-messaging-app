@@ -1,0 +1,16 @@
+# Regen-safety manifest for backbone-messaging-app.
+#
+# This app is hand-written composition (no schema-derived tree yet). Listing
+# everything means a future `metaphor schema generate` inside this project
+# can never silently delete the bootstrap surface.
+project:
+  name: backbone-messaging-app
+
+user_owned:
+  - src/**
+  - config/**
+  - tests/**
+  - README.md
+  - CLAUDE.md
+  - Dockerfile
+  - docker-compose.yml

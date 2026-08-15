@@ -1,0 +1,55 @@
+[package]
+name = "backbone-messaging-app"
+version = "0.1.0"
+edition = "2021"
+description = "Messaging application — composes the backbone-mail module into a runnable service: guarded discuss/chatter HTTP surface, SSE realtime over the outbox tailer, queue job runners, and the durable outbox relay."
+authors = ["Farid Hidayat"]
+license = "MIT"
+
+[[bin]]
+name = "backbone-messaging-app"
+path = "src/main.rs"
+
+[dependencies]
+backbone-auth = { git = "https://github.com/faridlab/backbone-framework", tag = "v2.7.0", features = ["axum"] }
+backbone-health = { git = "https://github.com/faridlab/backbone-framework", tag = "v2.7.0", features = ["cli"] }
+backbone-maintenance = { git = "https://github.com/faridlab/backbone-framework", tag = "v2.7.0" }
+backbone-observability = { git = "https://github.com/faridlab/backbone-framework", tag = "v2.7.0", features = ["audit"] }
+# The durable-consumer relay. Deliberately WITHOUT `multi_tenant` — backbone-mail
+# is company_fence: none (ADR-0014 posture 4); its outbox rows carry the platform
+# sentinel company id and are never filtered by company.
+backbone-outbox = { git = "https://github.com/faridlab/backbone-framework", tag = "v2.7.4", features = ["runner"] }
+
+# The domain module this app composes (workspace sibling, path dep).
+backbone-mail = { path = "../../modules/backbone-mail" }
+
+tokio = { version = "1.0", features = ["full"] }
+axum = { version = "0.7", features = ["macros"] }
+tower = "0.4"
+tower-http = { version = "0.5", features = ["cors", "trace"] }
+
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+serde_yaml = "0.9"
+
+sqlx = { version = "0.8", features = ["runtime-tokio-rustls", "postgres", "uuid", "chrono", "json", "migrate"] }
+
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+anyhow = "1.0"
+
+config = "0.14"
+
+uuid = { version = "1.0", features = ["v4", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+
+# Local development override — point the backbone-* git deps at the in-tree
+# workspace so framework changes are picked up without a push + tag bump.
+# Paths are relative to THIS app (apps/backbone-messaging-app).
+[patch."https://github.com/faridlab/backbone-framework"]
+backbone-auth = { path = "../../modules/backbone-framework/backbone-auth" }
+backbone-health = { path = "../../modules/backbone-framework/backbone-health" }
+backbone-maintenance = { path = "../../modules/backbone-framework/backbone-maintenance" }
+backbone-observability = { path = "../../modules/backbone-framework/backbone-observability" }
+backbone-outbox = { path = "../../modules/backbone-framework/backbone-outbox" }
