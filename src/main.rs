@@ -315,7 +315,7 @@ async fn shutdown_signal() {
     #[cfg(unix)]
     {
         let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-            .expect("install SIGTERM handler");
+            .unwrap_or_else(|e| panic!("failed to install SIGTERM handler: {e}"));
         tokio::select! {
             _ = ctrl_c => {},
             _ = sigterm.recv() => {},
