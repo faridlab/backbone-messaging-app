@@ -8,14 +8,17 @@
 //!   the verifier proves the caller's PARTNER id, never a company);
 //! - the public bootstrap + guest self-service behind the module's
 //!   `guest_context` (dgid cookie) — guests are first-class callers;
-//! - the sms provider webhook (`POST /sms/status`) mounted BARE — the raw-body
-//!   HMAC is the auth;
+//! - the sms provider webhook (`POST /sms/status`) and the inbound email
+//!   webhook (`POST /mail/inbound/:server_id`) mounted BARE — the raw-body
+//!   HMAC / per-row token IS the auth;
 //! - `GET /mail/realtime/stream` — SSE over the replica-local outbox tailer;
-//! - the queue job runners (sms/mail queues, scheduled dispatch, the three
-//!   GCs, the stuck-process sweep) on `tokio::spawn` interval loops;
+//! - the queue job runners (sms/mail queues through the gateway adapters,
+//!   scheduled dispatch, the four GCs, the stuck-process sweep) on
+//!   `tokio::spawn` interval loops;
 //! - the durable outbox relay (`backbone-outbox` runner) — carrier of record
-//!   for durable consumers; the SSE tailer is a replica-local convenience on
-//!   top of the same rows.
+//!   for durable consumers; its publish seam stages the MAIL-B7
+//!   previous-address security email on `UserEmailChanged`. The SSE tailer is
+//!   a replica-local convenience on top of the same rows.
 //!
 //! ## Subcommands
 //!
@@ -23,17 +26,16 @@
 //! - `healthcheck` — probe `/health` and exit 0 on 2xx (Docker HEALTHCHECK).
 //! - `migrate` — placeholder; real services delegate to `metaphor migration run-all`.
 //!
-//! ## Increment-3 seams (documented gaps, not silent ones)
+//! ## Seams (documented gaps, not silent ones)
 //!
-//! - The sms provider is the module's `NoopSmsApi` until the gateway group
-//!   (MAIL-M26/27) lands; `jobs.sms_provider` pins which port may be used
-//!   and only `noop` exists today.
-//! - The relay's publish seam LOGS each event (at-least-once, position
-//!   preserved); wiring it to backbone-notification's transport is the
-//!   increment-3 composition step.
-//! - `sms::gc` from the plan's job roster has no module service method yet
-//!   (nothing to reap that MAIL-B8's notification GC doesn't already bound);
-//!   it lands with the gateway group.
+//! - `jobs.sms_provider: noop` sends nothing (dev/tests); `http` routes
+//!   through the generic IAP-shaped provider under `gateway:`.
+//! - backbone-notification composition (relay→transport fan-out) is DEFERRED
+//!   to 3b: notification is company-fence RLS, this app is fence-none with no
+//!   company registry in its DB — composing it today would need an RLS bypass.
+//!   The MAIL-B7 handler is the one transport consumer that fits this fence.
+//! - Push devices, link previews, canned responses, translations, wizards, and
+//!   RTC remain 3b (port-notes scope register).
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -53,11 +55,15 @@ use tower_http::trace::TraceLayer;
 use tracing::{error, info};
 
 mod configuration;
+mod gateway;
 mod middleware;
 
 use backbone_mail::realtime::{session::SESSION_TTL_SECS, SessionSecret};
 use backbone_mail::application::service::{GcService, NoopSmsApi};
 use backbone_mail::MessagingModule;
+use gateway::mail_gateway::SmtpMailApi;
+use gateway::relay_b7::handle_relayed_event;
+use gateway::sms_gateway::HttpSmsApi;
 use configuration::AppConfig;
 use middleware::user_scope::{user_scope, UserScope};
 
@@ -105,12 +111,6 @@ async fn main() -> Result<()> {
         error!("insecure configuration: {e}");
         anyhow::anyhow!("insecure configuration: {e}")
     })?;
-    if app_config.jobs.sms_provider != "noop" {
-        anyhow::bail!(
-            "jobs.sms_provider {:?} is not available — only 'noop' until the increment-3 gateway group",
-            app_config.jobs.sms_provider
-        );
-    }
     info!("✅ Config loaded (secrets from env, validated non-empty)");
 
     let pool = sqlx::postgres::PgPoolOptions::new()
@@ -167,9 +167,10 @@ async fn main() -> Result<()> {
     let mut app = Router::new()
         .merge(health_routes(Arc::new(HealthChecker::new(HealthConfig::default()))))
         .merge(maintenance_router)
-        // The webhook mounts BARE — no identity middleware; the raw-body HMAC
-        // is the auth (fail-closed 503 when SMS_WEBHOOK_SECRET is unset).
+        // The webhooks mount BARE — no identity middleware; the raw-body HMAC
+        // (sms) / per-row token consteq (inbound mail) IS the auth.
         .merge(module.webhook_routes())
+        .merge(module.inbound_routes())
         .merge(guarded)
         .layer(axum::middleware::from_fn_with_state(
             Arc::new(AuditConfig { trust_proxy_headers: false }),
@@ -190,20 +191,36 @@ async fn main() -> Result<()> {
     let gc = &app_config.gc;
     let sms_module = Arc::clone(&module);
 
-    // sms::process_queue — the queue drainer on the (increment-3) port.
+    // sms::process_queue — the queue drainer on the provider port. The port is
+    // selected ONCE at boot (noop for dev/tests; the generic IAP-shaped HTTP
+    // provider for real deployments) — swapping providers is config, not code.
+    let sms_port: Arc<dyn backbone_mail::application::service::sms_ports::SmsApiPort> =
+        match app_config.jobs.sms_provider.as_str() {
+            "http" => Arc::new(HttpSmsApi::new(
+                app_config.gateway.sms_http_endpoint.clone(),
+                app_config.gateway.sms_http_token.clone(),
+            )),
+            _ => Arc::new(NoopSmsApi::accepting()),
+        };
+    info!("✅ SMS provider port: {}", app_config.jobs.sms_provider);
     spawn_interval("sms::process_queue", secs(jobs.sms_process_interval_seconds), move || {
         let m = Arc::clone(&sms_module);
+        let port = Arc::clone(&sms_port);
         async move {
-            let outcome = m.sms_write_service.process_queue(&NoopSmsApi::accepting(), 100, 1).await.map_err(|e| e.to_string())?;
+            let outcome = m.sms_write_service.process_queue(port.as_ref(), 100, 1).await.map_err(|e| e.to_string())?;
             Ok(format!("{outcome:?}"))
         }
     });
-    // mail::send_queue — claims outgoing mails, stages the dispatch request.
+    // mail::send_queue — claims outgoing mails and hands each row to the SMTP
+    // port (SmtpMailApi: per-row server selection via the MAIL-M26 ladder,
+    // per-server cached lettre transport, ADR-0024 env-ref passwords).
+    let mail_api = Arc::new(SmtpMailApi::new(pool.clone()));
     let mail_module = Arc::clone(&module);
     spawn_interval("mail::send_queue", secs(jobs.mail_process_interval_seconds), move || {
         let m = Arc::clone(&mail_module);
+        let port = Arc::clone(&mail_api);
         async move {
-            let outcome = m.mail_queue_write_service.process_queue(100, 1).await.map_err(|e| e.to_string())?;
+            let outcome = m.mail_queue_write_service.process_queue(port.as_ref(), 100, 1).await.map_err(|e| e.to_string())?;
             Ok(format!("{outcome:?}"))
         }
     });
@@ -242,27 +259,34 @@ async fn main() -> Result<()> {
         let svc = GcService::new(gc_pool.clone(), gc_cfg.notification_retention_days, gc_cfg.presence_stale_hours, gc_cfg.guest_stale_minutes, gc_cfg.stuck_threshold_minutes);
         async move { Ok(format!("{:?}", svc.sweep_stuck_process().await.map_err(|e| e.to_string())?)) }
     });
+    // sms::gc — reap terminal-state sms rows (sent/error/canceled) past the
+    // retention bound; pending rows survive (still awaiting the DSN).
+    let gc_pool = pool.clone();
+    let sms_retention = gc_cfg.sms_retention_days;
+    spawn_interval("sms::gc", secs(jobs.sms_gc_interval_seconds), move || {
+        let svc = GcService::new(gc_pool.clone(), gc_cfg.notification_retention_days, gc_cfg.presence_stale_hours, gc_cfg.guest_stale_minutes, gc_cfg.stuck_threshold_minutes);
+        async move { Ok(format!("reaped={}", svc.sms_gc(sms_retention).await.map_err(|e| e.to_string())?)) }
+    });
     info!("✅ Job runners started (queues / scheduled dispatch / GCs / stuck sweep)");
 
     // The durable relay: drains messaging.outbox_events (marks published).
-    // The publish seam logs for now — increment-3 wires the transport.
+    // The publish seam's one transport consumer today is MAIL-B7 — a
+    // UserEmailChanged event stages the security warning to the PREVIOUS
+    // address through the mail queue. Everything else is a logged pass-through
+    // (the notification composition seam is deferred to 3b; see README).
     let relay_pool = pool.clone();
+    let relay_mails = Arc::clone(&module.message_write_service);
     let relay_shutdown = shutdown_receiver();
     tokio::spawn(async move {
-        let publish = |rec: backbone_outbox::OutboxRecord| async move {
-            tracing::debug!(
-                target: "outbox::relay",
-                event = %rec.event_type,
-                aggregate = %rec.aggregate_id,
-                "outbox event relayed"
-            );
-            Ok(())
+        let publish = |rec: backbone_outbox::OutboxRecord| {
+            let mails = Arc::clone(&relay_mails);
+            async move { handle_relayed_event(&mails, &rec).await.map(|_| ()) }
         };
         if let Err(e) = relay_run(relay_pool, RelayConfig::new("messaging"), publish, relay_shutdown).await {
             error!(target: "outbox::relay", error = %e, "relay stopped on error");
         }
     });
-    info!("✅ Outbox relay started (schema=messaging, carrier of record)");
+    info!("✅ Outbox relay started (schema=messaging, MAIL-B7 consumer wired)");
 
     // The replica-local SSE tailer — publishes into the module's registry.
     let tailer = backbone_mail::realtime::tailer::spawn(

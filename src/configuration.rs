@@ -16,6 +16,8 @@ pub struct AppConfig {
     pub jobs: JobsConfig,
     pub gc: GcConfig,
     pub messaging: MessagingConfig,
+    #[serde(default)]
+    pub gateway: GatewayConfig,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -85,7 +87,8 @@ pub struct JobsConfig {
     pub presence_gc_interval_seconds: u64,
     pub guest_gc_interval_seconds: u64,
     pub stuck_sweep_interval_seconds: u64,
-    /// The sms port until the increment-3 gateway group: `noop` only.
+    pub sms_gc_interval_seconds: u64,
+    /// The sms transport port: `noop` | `http` (increment 3).
     #[serde(default = "default_sms_provider")]
     pub sms_provider: String,
 }
@@ -100,6 +103,16 @@ pub struct GcConfig {
     pub presence_stale_hours: i64,
     pub guest_stale_minutes: i64,
     pub stuck_threshold_minutes: i64,
+    pub sms_retention_days: i64,
+}
+
+/// The generic HTTP SMS provider (used when `jobs.sms_provider: http`).
+/// Both fields are env-var REFERENCES (ADR-0024) — empty is fine while the
+/// provider stays `noop`; selecting `http` with either empty is fatal at boot.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct GatewayConfig {
+    pub sms_http_endpoint: String,
+    pub sms_http_token: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -185,6 +198,20 @@ impl AppConfig {
         }
         if self.security.session_secret.trim().is_empty() {
             anyhow::bail!("security.session_secret is empty — set MESSAGING_SESSION_SECRET before starting");
+        }
+        match self.jobs.sms_provider.as_str() {
+            "noop" | "http" => {}
+            other => anyhow::bail!(
+                "jobs.sms_provider {other:?} is not a port this app implements (noop | http)"
+            ),
+        }
+        if self.jobs.sms_provider == "http" {
+            if self.gateway.sms_http_endpoint.trim().is_empty() {
+                anyhow::bail!("jobs.sms_provider is 'http' but gateway.sms_http_endpoint is empty — set SMS_HTTP_ENDPOINT");
+            }
+            if self.gateway.sms_http_token.trim().is_empty() {
+                anyhow::bail!("jobs.sms_provider is 'http' but gateway.sms_http_token is empty — set SMS_HTTP_TOKEN");
+            }
         }
         Ok(())
     }

@@ -22,6 +22,12 @@ backbone-outbox = { git = "https://github.com/faridlab/backbone-framework", tag 
 
 # The domain module this app composes (workspace sibling, path dep).
 backbone-mail = { path = "../../modules/backbone-mail" }
+# SMTP transport for the gateway adapters (SmtpMailApi over lettre; the module
+# itself never opens sockets — the port seam is implemented HERE).
+backbone-email = { path = "../../modules/backbone-framework/backbone-email" }
+
+# HTTP SMS provider adapter (IAP-shaped JSON; rustls per the workspace standard).
+reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
 
 tokio = { version = "1.0", features = ["full"] }
 axum = { version = "0.7", features = ["macros"] }
@@ -38,6 +44,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 anyhow = "1.0"
+async-trait = "0.1"
 
 config = "0.14"
 

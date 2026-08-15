@@ -36,7 +36,10 @@ jobs:
   presence_gc_interval_seconds: 3600
   guest_gc_interval_seconds: 600
   stuck_sweep_interval_seconds: 900
-  # Only 'noop' until the increment-3 gateway group (MAIL-M26/27).
+  # sms::gc — reap terminal sms rows past the retention bound (increment 3).
+  sms_gc_interval_seconds: 3600
+  # The sms transport port: 'noop' (dev/tests) or 'http' (the generic IAP-shaped
+  # provider under `gateway:` below). Anything else bails at boot.
   sms_provider: "noop"
 
 # GC bounds (mirror the module defaults; see backbone-mail GcService).
@@ -45,6 +48,14 @@ gc:
   presence_stale_hours: 12          # MAIL-M11
   guest_stale_minutes: 60           # MAIL-M43
   stuck_threshold_minutes: 15       # SM-B13
+  sms_retention_days: 90            # sms::gc (terminal rows only)
+
+# The generic HTTP SMS provider (jobs.sms_provider: http). Secrets are ENV-VAR
+# REFERENCES ONLY (ADR-0024): empty defaults are fine while the provider stays
+# 'noop'; selecting 'http' with either empty is a boot failure.
+gateway:
+  sms_http_endpoint: "${SMS_HTTP_ENDPOINT:-}"
+  sms_http_token: "${SMS_HTTP_TOKEN:-}"
 
 # MAIL-B1 static thread access: document models whose chatter is open to
 # every authenticated partner. Empty = deny-by-default (the safe posture —
