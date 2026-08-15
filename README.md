@@ -29,7 +29,9 @@ invalid token is a 401. Admin edges (author-or-admin gates) come from
 - **Job runners** (tokio spawn-interval, tracing target = job name): `sms::process_queue`
   (through the selected provider port), `mail::send_queue` (through `SmtpMailApi`),
   `mail_scheduled_notification::dispatch_due`, `mail_notification::gc`,
-  `mail_presence::gc`, `mail_guest::gc`, `sms::gc`, `sms::sweep_stuck_process`.
+  `mail_presence::gc`, `mail_guest::gc`, `sms::gc`, `sms::sweep_stuck_process`,
+  plus the opt-in `notification::dispatch_pending` (see
+  [backbone-notification composition](#backbone-notification-composition-sentinel-company)).
 - **Outbox relay** (`backbone-outbox` runner, schema `messaging`) — the carrier of record;
   marks rows `published_at`. The publish seam's one transport consumer is **MAIL-B7**: a
   `UserEmailChanged` event stages the security warning to the **previous** address through
@@ -72,14 +74,42 @@ Health: `curl :8080/health` · `cargo run -- healthcheck` (Docker HEALTHCHECK).
   + `gateway.sms_http_token` (env refs; empty under `http` is a boot failure). Provider
   swap is config, not code.
 
+## backbone-notification composition (sentinel company)
+
+Notification is company-fence RLS; this app is fence-none (ADR-0014 posture 4). The
+composition resolves that tension with a **sentinel platform company**: the app is the
+fence's one legitimate principal, and every notification row carries the configured
+company id. No RLS bypass anywhere.
+
+- **Opt-in:** `gateway.platform_company_id` (env ref `MESSAGING_PLATFORM_COMPANY_ID`).
+  Empty/unset = composition OFF — routes unmounted (404), dispatch job not started.
+  Set-but-unparseable is a boot failure.
+- **Surface:** the module's `guarded_routes` (`/notification_templates` full CRUD,
+  `/notifications` read-only) mount behind the user-scope verifier **plus** an
+  admin gate (`middleware/notification_gate.rs`): no partner → 401, non-admin → 403,
+  admin → the request runs inside `with_company_scope(platform_company)`.
+- **Dispatch:** `notification::dispatch_pending` sweeps pending rows under the same
+  scope and fans them out through **`QueueCommunicationPort`**
+  (`src/gateway/notification_gateway.rs`) — the SAME gateway the messaging pump uses:
+  `email` dispatches stage a mail row via `message_post` (the ack's `message_id` IS the
+  mail row id — the correlation key `record_delivery` correlates on), `sms` dispatches
+  enqueue an sms row tied back to the notification, anything else is an honest
+  `channel_not_composed` rejection recorded on the row. Interval:
+  `jobs.notification_dispatch_interval_seconds` (default 60).
+- **Posture assertion at boot:** composing notification turns the outbox crate's
+  `multi_tenant` feature on for the whole graph (cargo unifies features), which installs
+  the company-isolation RLS fence on `messaging.outbox_events` too. Messaging is
+  fence-none by declaration, so boot DROPS that policy from the messaging schema after
+  the outbox migrate; the notification schema keeps its fence (its writers self-scope
+  per row).
+- **One duplicate-crate trap, documented in `Cargo.toml`:** backbone-mail pins
+  backbone-orm at git tag v2.7.0 while backbone-notification pins branch `main` —
+  unpatched that is TWO backbone-orm crates, each with its own company-scope task-local,
+  and the fence silently fails at the task-local layer. The `[patch]` entry collapses
+  every ref onto the one local crate.
+
 ## Seams (documented gaps)
 
-- **backbone-notification composition is DEFERRED to 3b.** Notification is company-fence
-  RLS (its write paths wrap `with_company_scope`; its `dispatch_pending` needs a
-  per-company sweep); this app is fence-none (ADR-0014 posture 4) and its DB has no
-  company registry. Composing it today would require an RLS-bypassing role — a silently
-  wrong production posture. The MAIL-B7 relay handler is the one transport consumer that
-  fits this fence. Revisit with the 3b push/RTC work (port-notes scope register).
 - Push devices (MAIL-M13/M14, MAIL-B3/B4), link previews, canned responses,
   translations, wizards, and RTC remain 3b (module port-notes scope register).
 

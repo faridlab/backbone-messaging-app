@@ -38,6 +38,9 @@ jobs:
   stuck_sweep_interval_seconds: 900
   # sms::gc — reap terminal sms rows past the retention bound (increment 3).
   sms_gc_interval_seconds: 3600
+  # notification::dispatch_pending — re-drive stranded `pending` notification
+  # rows (only starts when the notification composition is armed below).
+  notification_dispatch_interval_seconds: 60
   # The sms transport port: 'noop' (dev/tests) or 'http' (the generic IAP-shaped
   # provider under `gateway:` below). Anything else bails at boot.
   sms_provider: "noop"
@@ -56,6 +59,10 @@ gc:
 gateway:
   sms_http_endpoint: "${SMS_HTTP_ENDPOINT:-}"
   sms_http_token: "${SMS_HTTP_TOKEN:-}"
+  # The PLATFORM company id the notification composition runs under. Empty
+  # (default) = notification stays OFF (routes unmounted, no dispatch job);
+  # set to a uuid to arm it. Set-but-not-a-uuid is a boot failure.
+  platform_company_id: "${MESSAGING_PLATFORM_COMPANY_ID:-}"
 
 # MAIL-B1 static thread access: document models whose chatter is open to
 # every authenticated partner. Empty = deny-by-default (the safe posture —

@@ -88,9 +88,18 @@ pub struct JobsConfig {
     pub guest_gc_interval_seconds: u64,
     pub stuck_sweep_interval_seconds: u64,
     pub sms_gc_interval_seconds: u64,
+    /// `notification::dispatch_pending` — re-drives stranded `pending`
+    /// notification rows (the dedup-slot reaper). Only starts when the
+    /// notification composition is armed (a platform company id is set).
+    #[serde(default = "default_notification_dispatch_interval_seconds")]
+    pub notification_dispatch_interval_seconds: u64,
     /// The sms transport port: `noop` | `http` (increment 3).
     #[serde(default = "default_sms_provider")]
     pub sms_provider: String,
+}
+
+fn default_notification_dispatch_interval_seconds() -> u64 {
+    60
 }
 
 fn default_sms_provider() -> String {
@@ -113,6 +122,24 @@ pub struct GcConfig {
 pub struct GatewayConfig {
     pub sms_http_endpoint: String,
     pub sms_http_token: String,
+    /// The PLATFORM company id the notification composition runs under (env
+    /// ref). backbone-notification is company-fence RLS; this app is fence-none
+    /// (ADR-0014 posture 4) — the sentinel id is the one company whose rows
+    /// live here. EMPTY (default) = the notification composition stays off
+    /// (routes unmounted, job not started); set to a uuid to arm it. Set but
+    /// unparseable is fatal at boot.
+    #[serde(default)]
+    pub platform_company_id: String,
+}
+
+impl GatewayConfig {
+    /// The parsed sentinel company id, or None when the composition is off.
+    pub fn platform_company(&self) -> Option<uuid::Uuid> {
+        if self.platform_company_id.trim().is_empty() {
+            return None;
+        }
+        self.platform_company_id.trim().parse().ok()
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -212,6 +239,15 @@ impl AppConfig {
             if self.gateway.sms_http_token.trim().is_empty() {
                 anyhow::bail!("jobs.sms_provider is 'http' but gateway.sms_http_token is empty — set SMS_HTTP_TOKEN");
             }
+        }
+        if !self.gateway.platform_company_id.trim().is_empty()
+            && self.gateway.platform_company().is_none()
+        {
+            anyhow::bail!(
+                "gateway.platform_company_id {:?} is not a uuid — set MESSAGING_PLATFORM_COMPANY_ID \
+                 to the platform company id (or leave it empty to keep the notification composition off)",
+                self.gateway.platform_company_id
+            );
         }
         Ok(())
     }

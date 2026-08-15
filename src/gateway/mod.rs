@@ -5,5 +5,6 @@
 //! generic HTTP JSON SMS provider (IAP-shaped, ADR-0024 env-ref secrets).
 
 pub mod mail_gateway;
+pub mod notification_gateway;
 pub mod relay_b7;
 pub mod sms_gateway;

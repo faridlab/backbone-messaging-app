@@ -19,6 +19,12 @@
 //!   for durable consumers; its publish seam stages the MAIL-B7
 //!   previous-address security email on `UserEmailChanged`. The SSE tailer is
 //!   a replica-local convenience on top of the same rows.
+//! - the backbone-notification composition (opt-in via
+//!   `gateway.platform_company_id`, empty = OFF): the notification module's
+//!   guarded routes mount behind an admin + sentinel-company gate, and its
+//!   `dispatch_pending` job fans notifications out through the SAME gateway
+//!   (`QueueCommunicationPort` stages them as mail rows / sms rows) — one
+//!   gateway, two producers.
 //!
 //! ## Subcommands
 //!
@@ -30,10 +36,16 @@
 //!
 //! - `jobs.sms_provider: noop` sends nothing (dev/tests); `http` routes
 //!   through the generic IAP-shaped provider under `gateway:`.
-//! - backbone-notification composition (relay→transport fan-out) is DEFERRED
-//!   to 3b: notification is company-fence RLS, this app is fence-none with no
-//!   company registry in its DB — composing it today would need an RLS bypass.
-//!   The MAIL-B7 handler is the one transport consumer that fits this fence.
+//! - backbone-notification is composed under ONE configured platform company
+//!   (the sentinel-company posture): notification is company-fence RLS and
+//!   this app is fence-none, so the app is the fence's ONLY legitimate
+//!   principal — every notification row carries the configured company id and
+//!   the gate + dispatch job both scope to it. No RLS bypass anywhere.
+//!   Boot also re-asserts messaging's fence-none posture by dropping the
+//!   outbox company-isolation policy from `messaging.outbox_events` —
+//!   composing notification turns the outbox crate's `multi_tenant` feature
+//!   on for the whole graph (cargo unifies features), which would otherwise
+//!   fence the fence-none messaging schema and fail every mail stage closed.
 //! - Push devices, link previews, canned responses, translations, wizards, and
 //!   RTC remain 3b (port-notes scope register).
 
@@ -60,11 +72,14 @@ mod middleware;
 
 use backbone_mail::realtime::{session::SESSION_TTL_SECS, SessionSecret};
 use backbone_mail::application::service::{GcService, NoopSmsApi};
+use backbone_mail::application::service::sms_write_service::SmsWriteService;
 use backbone_mail::MessagingModule;
 use gateway::mail_gateway::SmtpMailApi;
+use gateway::notification_gateway::QueueCommunicationPort;
 use gateway::relay_b7::handle_relayed_event;
 use gateway::sms_gateway::HttpSmsApi;
 use configuration::AppConfig;
+use middleware::notification_gate::{notification_gate, NotificationGate};
 use middleware::user_scope::{user_scope, UserScope};
 
 #[tokio::main]
@@ -127,7 +142,24 @@ async fn main() -> Result<()> {
     // The outbox table is owned by the outbox crate, not the module
     // migrations — bring it up (idempotent) before anything stages events.
     backbone_outbox::outbox::migrate(&pool, "messaging").await?;
-    info!("✅ Outbox schema present (messaging.outbox_events)");
+    // ADR-0014 posture assertion: messaging is fence-NONE (posture 4), but
+    // composing backbone-notification (company-fence) turns the outbox
+    // crate's `multi_tenant` feature on for the WHOLE graph — cargo unifies
+    // features — so the migrate above also installs the company-isolation
+    // RLS fence on messaging.outbox_events. That silently breaks this app's
+    // declared posture: mail stages outbox rows with the nil sentinel
+    // company id and its relay/HTTP paths run unscooped, so every stage,
+    // read and publish would fail closed. Remove the fence HERE — the
+    // composition layer owns the posture decision. The notification schema
+    // (armed below) KEEPS its fence: that module is company-fenced and its
+    // writers self-scope per row.
+    sqlx::query("DROP POLICY IF EXISTS outbox_events_company_isolation ON messaging.outbox_events")
+        .execute(&pool)
+        .await?;
+    sqlx::query("ALTER TABLE messaging.outbox_events DISABLE ROW LEVEL SECURITY")
+        .execute(&pool)
+        .await?;
+    info!("✅ Outbox schema present (messaging.outbox_events, fence-none per ADR-0014 posture 4)");
 
     // ── The domain module ─────────────────────────────────────────────────────
     let module = Arc::new(MessagingModule::builder().with_database(pool.clone()).build()?);
@@ -153,14 +185,49 @@ async fn main() -> Result<()> {
     // The guarded surface: user-scope verifier (optional Bearer → partner)
     // THEN the module's guest_context (partner ext → dgid cookie → anonymous).
     // The session secret rides the presence + realtime groups (proof minting).
-    let guarded = Router::new()
+    // NOTE: `Router::layer` wraps only what is ALREADY merged — the shared
+    // layers below must come after every merge, so the notification
+    // composition is merged into `guarded` first, then the verifier +
+    // guest_context wrap the whole thing.
+    let mut guarded = Router::new()
         .merge(module.messaging_routes())
         .merge(module.discuss_routes())
         .merge(module.attachment_routes())
         .merge(module.guest_routes())
         .merge(module.public_routes())
         .merge(module.presence_routes().layer(axum::Extension(session_secret.clone())))
-        .merge(module.realtime_routes().layer(axum::Extension(session_secret.clone())))
+        .merge(module.realtime_routes().layer(axum::Extension(session_secret.clone())));
+
+    // ── Notification composition (armed by a platform company id) ────────────
+    // backbone-notification under ONE sentinel company: routes admin-gated and
+    // company-scoped by the same layer; the dispatch job sweeps the same fence.
+    // No id configured → the composition stays off (dev/test default).
+    let mut notification = None;
+    if let Some(company) = app_config.gateway.platform_company() {
+        // The notification composition stages lifecycle events into
+        // notification.outbox_events through backbone-outbox — bring it up
+        // (idempotent) so the table always matches the crate's CURRENT shape.
+        // (The module's own 2026-07 migration created an 11-column variant
+        // without company_id; CREATE IF NOT EXISTS would let the stale table
+        // shadow the crate's and every stage would fail.)
+        backbone_outbox::outbox::migrate(&pool, "notification").await?;
+        let notif = backbone_notification::NotificationModule::builder()
+            .with_database(pool.clone())
+            .build()
+            .map_err(|e| {
+                error!("notification module build failed: {e}");
+                anyhow::anyhow!("notification module build failed: {e}")
+            })?;
+        let gate = NotificationGate { company };
+        guarded = guarded.merge(
+            notif.guarded_routes()
+                .layer(from_fn_with_state(gate, notification_gate)),
+        );
+        info!("✅ backbone-notification mounted (platform company {company}, admin-gated)");
+        notification = Some(notif);
+    }
+
+    let guarded = guarded
         .layer(from_fn_with_state(verifier, user_scope))
         .layer(axum::middleware::from_fn(backbone_mail::presentation::middleware::guest_context));
 
@@ -267,6 +334,33 @@ async fn main() -> Result<()> {
         let svc = GcService::new(gc_pool.clone(), gc_cfg.notification_retention_days, gc_cfg.presence_stale_hours, gc_cfg.guest_stale_minutes, gc_cfg.stuck_threshold_minutes);
         async move { Ok(format!("reaped={}", svc.sms_gc(sms_retention).await.map_err(|e| e.to_string())?)) }
     });
+    // notification::dispatch_pending — the stranded-`pending` reaper (the
+    // (event_id, recipient) dedup slot makes a crash between INSERT and
+    // dispatch unrecoverable WITHOUT this sweep). Runs under the sentinel
+    // company: the write service reads `pending` under the AMBIENT scope, so
+    // the sweep must fence exactly like the routes do. Only armed when the
+    // notification composition is.
+    if let (Some(notif), Some(company)) = (&notification, app_config.gateway.platform_company()) {
+        let notif_ws = notif.write_service();
+        let comm = Arc::new(QueueCommunicationPort::new(
+            Arc::clone(&module.message_write_service),
+            Arc::new(SmsWriteService::new(pool.clone())),
+        ));
+        spawn_interval("notification::dispatch_pending", secs(jobs.notification_dispatch_interval_seconds), move || {
+            let ws = Arc::clone(&notif_ws);
+            let port = Arc::clone(&comm);
+            async move {
+                let sink = backbone_notification::application::service::notification_events::LoggingSink;
+                let dispatched = backbone_orm::company_scope::with_company_scope(
+                    Some(company),
+                    ws.dispatch_pending(100, port.as_ref(), &sink),
+                )
+                .await
+                .map_err(|e| e.to_string())?;
+                Ok(format!("dispatched={dispatched}"))
+            }
+        });
+    }
     info!("✅ Job runners started (queues / scheduled dispatch / GCs / stuck sweep)");
 
     // The durable relay: drains messaging.outbox_events (marks published).

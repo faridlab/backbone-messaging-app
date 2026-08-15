@@ -22,6 +22,14 @@ backbone-outbox = { git = "https://github.com/faridlab/backbone-framework", tag 
 
 # The domain module this app composes (workspace sibling, path dep).
 backbone-mail = { path = "../../modules/backbone-mail" }
+# The notification engine (workspace sibling, path dep) — the relay's second
+# producer. Company-fence RLS; the app composes it under ONE configured
+# platform company id (see middleware/notification_gate.rs).
+backbone-notification = { path = "../../modules/backbone-notification" }
+# The company-scope fence helpers (with_company_scope for the notification
+# gate + dispatch job). Pinned to the SAME tag backbone-mail uses so there is
+# exactly one backbone-orm in the graph.
+backbone-orm = { git = "https://github.com/faridlab/backbone-framework", tag = "v2.7.0" }
 # SMTP transport for the gateway adapters (SmtpMailApi over lettre; the module
 # itself never opens sockets — the port seam is implemented HERE).
 backbone-email = { path = "../../modules/backbone-framework/backbone-email" }
@@ -60,3 +68,10 @@ backbone-health = { path = "../../modules/backbone-framework/backbone-health" }
 backbone-maintenance = { path = "../../modules/backbone-framework/backbone-maintenance" }
 backbone-observability = { path = "../../modules/backbone-framework/backbone-observability" }
 backbone-outbox = { path = "../../modules/backbone-framework/backbone-outbox" }
+# MUST be patched: backbone-mail pins backbone-orm at git tag v2.7.0 while
+# backbone-notification pins git branch main — unpatched, that is TWO crates,
+# each with its OWN company-scope task-local, and the sentinel-company scope
+# set by one copy is invisible to the other's queries (the fence silently
+# fails open at the task-local layer). The patch collapses every ref onto the
+# one local crate.
+backbone-orm = { path = "../../modules/backbone-framework/backbone-orm" }
