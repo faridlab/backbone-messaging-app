@@ -21,22 +21,15 @@ backbone-observability = { git = "https://github.com/faridlab/backbone-framework
 backbone-outbox = { git = "https://github.com/faridlab/backbone-framework", tag = "v2.7.4", features = ["runner"] }
 
 # The domain module this app composes (workspace sibling, path dep).
-backbone-mail = { path = "../../modules/backbone-mail" }
+backbone-mail = { path = "../../modules/backbone-mail", features = ["gateway-smtp", "gateway-sms-http"] }
 # The notification engine (workspace sibling, path dep) — the relay's second
 # producer. Company-fence RLS; the app composes it under ONE configured
 # platform company id (see middleware/notification_gate.rs).
-backbone-notification = { path = "../../modules/backbone-notification" }
+backbone-notification = { path = "../../modules/backbone-notification", features = ["gateway-queue"] }
 # The company-scope fence helpers (with_company_scope for the notification
 # gate + dispatch job). Pinned to the SAME tag backbone-mail uses so there is
 # exactly one backbone-orm in the graph.
 backbone-orm = { git = "https://github.com/faridlab/backbone-framework", tag = "v2.7.0" }
-# SMTP transport for the gateway adapters (SmtpMailApi over lettre; the module
-# itself never opens sockets — the port seam is implemented HERE).
-backbone-email = { path = "../../modules/backbone-framework/backbone-email" }
-
-# HTTP SMS provider adapter (IAP-shaped JSON; rustls per the workspace standard).
-reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
-
 tokio = { version = "1.0", features = ["full"] }
 axum = { version = "0.7", features = ["macros"] }
 tower = "0.4"
@@ -75,3 +68,8 @@ backbone-outbox = { path = "../../modules/backbone-framework/backbone-outbox" }
 # fails open at the task-local layer). The patch collapses every ref onto the
 # one local crate.
 backbone-orm = { path = "../../modules/backbone-framework/backbone-orm" }
+# Same dedup for backbone-mail: notification's `gateway-queue` dep pins the
+# git tag while this app composes the workspace path — collapse onto the path
+# so QueueCommunicationPort and main.rs share ONE MessageWriteService type.
+[patch."https://github.com/faridlab/backbone-mail"]
+backbone-mail = { path = "../../modules/backbone-mail" }

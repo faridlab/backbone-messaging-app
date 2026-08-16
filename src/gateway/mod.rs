@@ -1,10 +1,10 @@
-//! Gateway adapters (increment 3) — the app-side impls of backbone-mail's
-//! transport ports. The module owns the queue rows and state machines; these
-//! adapters own the sockets: SMTP over `backbone-email`'s lettre service
-//! (per-row server selection via the module's MAIL-M26 ladder), and the
-//! generic HTTP JSON SMS provider (IAP-shaped, ADR-0024 env-ref secrets).
+//! Gateway wiring (increment 3) — the transport adapters live in the modules
+//! now (promoted): backbone-mail's `gateway-smtp` / `gateway-sms-http`
+//! features and backbone-notification's `gateway-queue`. This app keeps only
+//! its own outbox relay handler (`relay_b7`); the adapters are re-exported so
+//! main.rs's imports stay stable.
 
-pub mod mail_gateway;
-pub mod notification_gateway;
 pub mod relay_b7;
-pub mod sms_gateway;
+
+pub use backbone_mail::infrastructure::gateway::{HttpSmsApi, SmtpMailApi};
+pub use backbone_notification::infrastructure::gateway::QueueCommunicationPort;
