@@ -68,7 +68,6 @@ use tracing::{error, info};
 
 mod configuration;
 mod gateway;
-mod middleware;
 
 use backbone_mail::realtime::{session::SESSION_TTL_SECS, SessionSecret};
 use backbone_mail::application::service::{GcService, NoopSmsApi};
@@ -76,11 +75,11 @@ use backbone_mail::application::service::sms_write_service::SmsWriteService;
 use backbone_mail::MessagingModule;
 use gateway::SmtpMailApi;
 use gateway::QueueCommunicationPort;
-use gateway::relay_b7::handle_relayed_event;
 use gateway::HttpSmsApi;
+use backbone_mail::application::service::relay_b7::handle_relayed_event;
 use configuration::AppConfig;
-use middleware::notification_gate::{notification_gate, NotificationGate};
-use middleware::user_scope::{user_scope, UserScope};
+use backbone_notification::presentation::middleware::{notification_gate, NotificationGate};
+use backbone_mail::presentation::middleware::{user_scope, UserScope};
 
 #[tokio::main]
 async fn main() -> Result<()> {
