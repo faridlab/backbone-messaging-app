@@ -54,6 +54,7 @@ cargo run -- healthcheck                  # probe /health (used by Docker HEALTH
 - **MUST** wrap any hand edit inside a generator-emitted file in `// <<< CUSTOM ... // END CUSTOM` markers. Edits outside markers are wiped on regen.
 - **SHOULD** expose `/health`, `/readyz`, `/metrics` (Prometheus) and structured JSON logs. The skeleton wires `/health` plus a maintenance gate (`/maintenance/status`, `POST /maintenance`) out of the box.
 - **SHOULD** feature-gate optional transports (`grpc`, `graphql`) when the module supports them.
+- **MUST** read and follow the target repo's own `CLAUDE.md` when working across repos — before editing in another repo, read its rules; the more local `CLAUDE.md` always wins.
 
 ## Folder cheatsheet
 
